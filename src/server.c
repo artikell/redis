@@ -96,6 +96,90 @@ const char *replstateToString(int replstate);
  * function of Redis may be called from other threads. */
 void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
 
+struct logItem* logFormat[1024];
+logTag logTags[LOG_TYPE_MAX];
+int logFormatSize;
+
+void serverLogPreformat() {
+
+    logInitTag(logTags[LOG_TYPE_LEVEL], LOG_TYPE_LEVEL, "level");
+    logInitTag(logTags[LOG_TYPE_MSG],   LOG_TYPE_MSG,   "msg");
+    logInitTag(logTags[LOG_TYPE_ROLE],  LOG_TYPE_ROLE,  "role");
+    logInitTag(logTags[LOG_TYPE_PID],   LOG_TYPE_PID,   "pid");
+    logInitTag(logTags[LOG_TYPE_TIME],  LOG_TYPE_TIME,  "time");
+
+    printf("--- %s\n", server.logformat);
+    int formatLength = strlen(server.logformat);
+
+    int start = 0, lastPos = 0;
+    int argLen = 0;
+    logItem* item;
+
+    for (size_t end = 0; end <= formatLength; end++) {
+        if (end == formatLength) {
+            if (end > start) {
+                argLen = end - start;
+
+                item = zmalloc(sizeof(logItem));
+                item->type = LOG_TYPE_TEXT;
+
+                item->arg = zmalloc(argLen + 1);
+                memmove(item->arg, server.logformat + start, argLen);
+                logFormat[logFormatSize++] = item;
+            }
+            break;
+        }
+        char c = server.logformat[end];
+        if (c == '}') {
+            if (lastPos == -1) {
+                continue;
+            }
+
+            for (size_t i = LOG_TYPE_TEXT + 1; i < LOG_TYPE_MAX; i++) {
+                logTag* ttag = &logTags[i];
+
+                if (strncmp(server.logformat + lastPos + 1, ttag->text, ttag->len) != 0) {
+                    continue;
+                }
+
+                if (lastPos > start) {
+
+                    argLen = lastPos - start;
+
+                    item = zmalloc(sizeof(logItem));
+                    item->type = LOG_TYPE_TEXT;
+                    item->arg = zmalloc(argLen + 1);
+                    memmove(item->arg, server.logformat + start, argLen);
+                    logFormat[logFormatSize++] = item;
+
+                    start = lastPos + 1;
+                }
+
+                item = zmalloc(sizeof(logItem));
+                item->type = ttag->type;
+                item->arg = NULL;
+
+                if (server.logformat[start + ttag->len] == ':') {
+                    argLen = end - (start + ttag->len) - 1;
+                    item->arg = zmalloc(argLen + 1);
+                    memmove(item->arg, server.logformat + start + ttag->len + 1, argLen);
+                }
+                logFormat[logFormatSize++] = item;
+
+                lastPos = -1;
+                start = end + 1;
+                break;
+            }
+        } if (c == '{') {
+            lastPos = end;
+        }
+    }
+    for (size_t i = 0; i < logFormatSize; i++) {
+        printf("%s", logFormat[i]->arg);
+    }
+    printf("\n");
+}
+
 /* Low level logging. To use only for very big messages, otherwise
  * serverLog() is to prefer. */
 void serverLogRaw(int level, const char *msg) {
@@ -115,25 +199,58 @@ void serverLogRaw(int level, const char *msg) {
     if (rawmode) {
         fprintf(fp,"%s",msg);
     } else {
-        int off;
-        struct timeval tv;
-        int role_char;
         pid_t pid = getpid();
+        char role_char;
 
-        gettimeofday(&tv,NULL);
-        struct tm tm;
-        nolocks_localtime(&tm,tv.tv_sec,server.timezone,server.daylight_active);
-        off = strftime(buf,sizeof(buf),"%d %b %Y %H:%M:%S.",&tm);
-        snprintf(buf+off,sizeof(buf)-off,"%03d",(int)tv.tv_usec/1000);
-        if (server.sentinel_mode) {
-            role_char = 'X'; /* Sentinel. */
-        } else if (pid != server.pid) {
-            role_char = 'C'; /* RDB / AOF writing child. */
-        } else {
-            role_char = (server.masterhost ? 'S':'M'); /* Slave or Master. */
+        for (size_t i = 0; i < logFormatSize; i++) {
+            logItem* item = logFormat[i];
+            switch (item->type) {
+            case LOG_TYPE_ROLE: {
+                if (server.sentinel_mode) {
+                    role_char = 'X'; /* Sentinel. */
+                } else if (pid != server.pid) {
+                    role_char = 'C'; /* RDB / AOF writing child. */
+                } else {
+                    role_char = (server.masterhost ? 'S':'M'); /* Slave or Master. */
+                }
+                fprintf(fp,"%c", role_char);
+                break;
+            }
+            case LOG_TYPE_TIME: {
+                int off;
+                struct timeval tv;
+
+                gettimeofday(&tv,NULL);
+                struct tm tm;
+                nolocks_localtime(&tm,tv.tv_sec, server.timezone, server.daylight_active);
+                // off = strftime(buf, sizeof(buf), "%d %b %Y %H:%M:%S.", &tm);
+                off = strftime(buf, sizeof(buf), item->arg, &tm);
+                snprintf(buf+off, sizeof(buf) - off, "%03d", (int)tv.tv_usec/1000);
+
+                fprintf(fp,"%s", buf);
+                break;
+            }
+            case LOG_TYPE_PID: {
+                fprintf(fp,"%d", (int)pid);
+                break;
+            }
+            case LOG_TYPE_LEVEL: {
+                fprintf(fp,"%c", c[level]);
+                break;
+            }
+            case LOG_TYPE_MSG: {
+                fprintf(fp,"%s", msg);
+                break;
+            }            
+            case LOG_TYPE_TEXT: {
+                fprintf(fp,"%s", item->arg);
+                break;
+            }
+            default:
+                break;
+            }
         }
-        fprintf(fp,"%d:%c %s %c %s\n",
-            (int)getpid(),role_char, buf,c[level],msg);
+        fprintf(fp,"\n");
     }
     fflush(fp);
 
@@ -6891,6 +7008,10 @@ int main(int argc, char **argv) {
     if (exec_name == NULL) exec_name = argv[0];
     server.sentinel_mode = checkForSentinelMode(argc,argv, exec_name);
     initServerConfig();
+    serverLogPreformat();
+
+    serverLog(LL_WARNING, "oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo");
+    exit(0);
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
     moduleInitModulesSystem();

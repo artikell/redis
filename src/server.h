@@ -1464,6 +1464,33 @@ typedef enum childInfoType {
     CHILD_INFO_TYPE_MODULE_COW_SIZE
 } childInfoType;
 
+#define LOG_TYPE_TEXT   0
+#define LOG_TYPE_LEVEL  1
+#define LOG_TYPE_TIME   2
+#define LOG_TYPE_MSG    3
+#define LOG_TYPE_ROLE   4
+#define LOG_TYPE_PID    5
+#define LOG_TYPE_MAX    6
+
+typedef struct logTag {
+    int     type;
+    char*   text;
+    int     len;
+} logTag;
+
+/* Macro to initialize an IO context. Note that the 'ver' field is populated
+ * inside rdb.c according to the version of the value to load. */
+#define logInitTag(tag, ttype, tptr) do { \
+    tag.type = ttype; \
+    tag.text = tptr; \
+    tag.len = strlen(tptr); \
+} while(0)
+
+typedef struct logItem {
+    int     type;
+    char*   arg;
+} logItem;
+
 struct redisServer {
     /* General */
     pid_t pid;                  /* Main process pid. */
@@ -1741,6 +1768,7 @@ struct redisServer {
     int replication_allowed;        /* Are we allowed to replicate? */
     /* Logging */
     char *logfile;                  /* Path of log file */
+    char *logformat;                /* Format of log file */
     int syslog_enabled;             /* Is syslog enabled? */
     char *syslog_ident;             /* Syslog ident */
     int syslog_facility;            /* Syslog facility */
